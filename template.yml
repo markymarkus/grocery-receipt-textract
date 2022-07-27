@@ -1,0 +1,253 @@
+---
+###
+## Parameters
+Parameters:
+  InputBucketName:
+    Type: String
+    MinLength: '3'
+    MaxLength: '63'
+    Default: 'my-receipts-bucket'
+    Description: 'The name of input S3 bucket for receipts'
+###
+## Resources
+Resources:
+  InputBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Ref InputBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'AES256'
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+
+  OutputBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub "${InputBucketName}-output"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'AES256'
+
+  EventRule: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: 'Trigger receipt processing'
+      EventPattern: 
+        source: 
+          - "aws.s3"
+        detail-type: 
+          - "Object Created"
+        detail: 
+          bucket:
+            name:
+            - !Ref InputBucketName
+      State: 'ENABLED'
+      Targets: 
+        - Arn: !GetAtt TriggerTextractFunction.Arn
+          Id: 'textractfunction'
+
+  PermissionForEventsToInvokeLambda: 
+    Type: 'AWS::Lambda::Permission'
+    Properties: 
+      FunctionName: !Ref TriggerTextractFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt EventRule.Arn
+
+  TriggerTextractFunction:
+    Type: 'AWS::Lambda::Function'
+    Description: Invokes Textract job
+    Properties:
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          DOCUMENT_ANALYIS_COMPLETED_SNS_TOPIC_ARN: !Ref DocumentAnalysisCompletedTopic
+          TEXTRACT_PUBLISH_TO_SNS_ROLE_ARN: !GetAtt TextractPublishToSNSTopicRole.Arn
+      Role: !GetAtt TriggerTextractFunctionRole.Arn
+      Code: trigger_textract/
+
+
+  TriggerTextractFunctionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - !Ref TriggerTextractFunctionPolicy
+
+  TriggerTextractFunctionPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+              - Effect: Allow
+                Action: 
+                  - 's3:GetObject'
+                Resource: !Sub 'arn:aws:s3:::${InputBucketName}/*'
+              - Effect: Allow
+                Action:
+                  - 'textract:StartDocumentTextDetection'
+                  - 'textract:StartDocumentAnalysis'
+                Resource:
+                  - '*'
+###
+## SNS & SQS for Textract
+  DocumentAnalysisCompletedTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-analysis-completed'
+
+  DocumentAnalysisCompletedQueue:
+    Type: 'AWS::SQS::Queue'
+    Properties:
+      DelaySeconds: 5
+      QueueName: !Sub '${AWS::StackName}-analysis-completed'
+      ReceiveMessageWaitTimeSeconds: 20
+      VisibilityTimeout: 60
+
+  DocumentAnalysisCompletedQueuePolicy: 
+    Type: 'AWS::SQS::QueuePolicy'
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: 
+              Service: sns.amazonaws.com
+            Action:
+              - sqs:SendMessage
+            Resource: '*'
+      Queues:
+        - !Ref DocumentAnalysisCompletedQueue
+
+  DocumentAnalysisCompletedSNSSubscription:
+    Type: 'AWS::SNS::Subscription'
+    Properties:
+      Protocol: sqs
+      Endpoint: !GetAtt DocumentAnalysisCompletedQueue.Arn
+      TopicArn: !Ref DocumentAnalysisCompletedTopic
+
+  TextractPublishToSNSTopicRole: 
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement: 
+          - Effect: Allow
+            Principal: 
+              Service: 
+                - textract.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: sns
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref DocumentAnalysisCompletedTopic
+
+  DocumentTextProcessFunction:
+    Type: 'AWS::Lambda::Function'
+    Description: Processes text from the receipts and write jsons to OUTPUT_BUCKET
+    Properties:
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Timeout: 60
+      MemorySize: 256
+      Role: !GetAtt DocumentTextProcessFunctionRole.Arn
+      Environment:
+        Variables:
+          OUTPUT_BUCKET: !Ref OutputBucket
+      Code: process_textract/
+
+  LambdaFunctionEventSourceMapping:
+    Type: 'AWS::Lambda::EventSourceMapping'
+    Properties:
+      BatchSize: 10
+      Enabled: true
+      EventSourceArn: !GetAtt DocumentAnalysisCompletedQueue.Arn
+      FunctionName: !GetAtt DocumentTextProcessFunction.Arn
+
+  DocumentTextProcessFunctionRole: 
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement: 
+          - Effect: Allow
+            Principal: 
+              Service: 
+                - lambda.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: lambda_basic_execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement: 
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Effect: Allow
+                Action: 
+                  - 's3:PutObject'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${InputBucketName}-output/*'
+        - PolicyName: sqs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ReceiveMessage
+                Resource: !GetAtt DocumentAnalysisCompletedQueue.Arn
+        - PolicyName: step_functions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'textract:GetDocumentAnalysis'
+                Resource:
+                  - '*'
+###
+## Outputs
+Outputs:
+  InputBucket:
+    Description: S3 bucket for receipt pdf and jpg
+    Value: !Ref InputBucket
+  OutputBucket:
+    Description: S3 bucket for pipeline output. receipts in json
+    Value: !Ref OutputBucket

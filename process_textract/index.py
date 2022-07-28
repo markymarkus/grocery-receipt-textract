@@ -12,6 +12,7 @@ LOGGER.setLevel(logging.DEBUG)
 
 OUTPUT_BUCKET = os.environ["OUTPUT_BUCKET"]
 IGNORE_PRODUCTS = ["yhteen", "alennus"]
+RECEIPT_STORE = ["s-market","prisma","sale","k-market","kcm","k-citymarket"]
 
 textract = boto3.client('textract')
 
@@ -75,8 +76,7 @@ def get_table_results(blocks):
         if block['BlockType'] == "TABLE":
             table_blocks.append(block)
         elif block['BlockType'] == "LINE":
-            kaupat = ["s-market","prisma","sale","k-market"]
-            if any(x in block['Text'].lower() for x in kaupat):
+            if any(x in block['Text'].lower() for x in RECEIPT_STORE):
                 if receipt_store == "":
                     receipt_store = block['Text'].split(",")[0]
             elif is_date(block['Text']):

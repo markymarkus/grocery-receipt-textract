@@ -106,27 +106,29 @@ def generate_price_data(table_result, blocks_map):
         is_skipped = False
         product_name = cols[1].strip()
         product_price = ""
-        product_unit = "EUR/KPL"
+        product_unit = ""
         
         for product in IGNORE_PRODUCTS:
             if product in product_name.lower():
                 is_skipped = True
                 continue
         if not is_skipped and product_name != "":
-            if "EUR/" in product_name:
+            if (u"\N{euro sign}" in product_name) or ("EUR/" in product_name):
                 tuote_split = product_name.split(" ")
-                index = [idx for idx, s in enumerate(tuote_split) if 'EUR/' in s][0]
-                product_price = tuote_split[index-1]
+
+                index = [idx for idx, s in enumerate(tuote_split) if ('EUR/' in s) or (u"\N{euro sign}/" in s)][0]
+                product_price = tuote_split[index-1].replace(',','.',1)
                 product_name = tuote_split[0]
-                product_unit = tuote_split[-1]
+                product_unit = tuote_split[-1].split("/")[1]
                 # Textract splits some receipt rows to two rows, in those cases
                 # just update the item price 
                 if tuote_split[0].replace('.','',1).isdigit():
                     try:
                         products[-1]['price'] = float(product_price)
+                        products[-1]['unit'] = product_unit
                     except:
                         # Textract doesn't always get price right.. If price is not float, delete the item
-                        if len(products) > 0:                        
+                        if len(products) > 0:
                             del products[-1]
                     continue
                 else:
@@ -172,6 +174,7 @@ def lambda_handler(event, context):
                 'name': product['name'],
                 'price': product['price'],
                 'currency': 'EUR',
+                'unit': product['unit'],
                 'date': str(datef)
             }
             LOGGER.debug(item)

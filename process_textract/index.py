@@ -71,6 +71,7 @@ def get_table_results(blocks):
     table_blocks = []
 
     receipt_store = ""
+    receipt_date = ""
     for block in blocks:
         blocks_map[block['Id']] = block
         if block['BlockType'] == "TABLE":
@@ -80,7 +81,8 @@ def get_table_results(blocks):
                 if receipt_store == "":
                     receipt_store = block['Text'].split(",")[0]
             elif is_date(block['Text']):
-                receipt_date = is_date(block['Text'])
+                if receipt_date == "":
+                    receipt_date = is_date(block['Text'])
             
             if is_time(block['Text']):
                 receipt_time=is_time(block['Text'])
